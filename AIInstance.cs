@@ -31,6 +31,7 @@ public class AIInstance : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(StatusColor));
+            UpdateFlashLoop();
         }
     }
 
@@ -72,6 +73,78 @@ public class AIInstance : INotifyPropertyChanged
 
             return label;
         }
+    }
+
+    private bool _isFlashing;
+    private CancellationTokenSource? _flashCts;
+
+    /// <summary>
+    /// Background color for the row — flashes for WaitingForPermission to draw attention.
+    /// </summary>
+    public Color RowBackground
+    {
+        get
+        {
+            var isDark = Application.Current?.RequestedTheme == AppTheme.Dark;
+
+            if (_isFlashing)
+                return Color.FromArgb(isDark ? "#4D1A1A" : "#FFE0E0");
+
+            return Color.FromArgb(isDark ? "#2A2A2A" : "#F5F5F5");
+        }
+    }
+
+    private void UpdateFlashLoop()
+    {
+        _flashCts?.Cancel();
+        _flashCts?.Dispose();
+        _flashCts = null;
+
+        if (_status == AIStatus.WaitingForPermission)
+        {
+            _flashCts = new CancellationTokenSource();
+            _ = FlashLoop(_flashCts.Token);
+        }
+        else
+        {
+            _isFlashing = false;
+            OnPropertyChanged(nameof(RowBackground));
+        }
+    }
+
+    private async Task FlashLoop(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                // 3 quick pulses (0.5s each = 1.5s total)
+                for (var i = 0; i < 3 && !ct.IsCancellationRequested; i++)
+                {
+                    _isFlashing = true;
+                    OnPropertyChanged(nameof(RowBackground));
+                    await Task.Delay(250, ct);
+
+                    _isFlashing = false;
+                    OnPropertyChanged(nameof(RowBackground));
+                    await Task.Delay(250, ct);
+                }
+
+                // wait 10 seconds before next burst
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>
+    /// Stops the flash loop. Call before removing from the collection.
+    /// </summary>
+    public void StopFlash()
+    {
+        _flashCts?.Cancel();
+        _flashCts?.Dispose();
+        _flashCts = null;
     }
 
     /// <summary>

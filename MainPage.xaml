@@ -21,7 +21,7 @@
                 <DataTemplate x:DataType="local:AIInstance">
                     <Border Stroke="Transparent"
                             StrokeShape="RoundRectangle 8"
-                            BackgroundColor="{AppThemeBinding Light=#F5F5F5, Dark=#2A2A2A}"
+                            BackgroundColor="{Binding RowBackground}"
                             Padding="12"
                             Margin="0,4">
                         <Grid ColumnDefinitions="16,*,Auto" ColumnSpacing="12">

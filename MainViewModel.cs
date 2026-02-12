@@ -97,7 +97,10 @@ public class MainViewModel : INotifyPropertyChanged
         for (var i = Instances.Count - 1; i >= 0; i--)
         {
             if (!latestById.ContainsKey(Instances[i].Id))
+            {
+                Instances[i].StopFlash();
                 Instances.RemoveAt(i);
+            }
         }
 
         // update existing or add new
