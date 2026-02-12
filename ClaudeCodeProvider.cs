@@ -368,36 +368,34 @@ public class ClaudeCodeProvider : IAIProvider
             var length = fs.Length;
             if (length == 0) return AIStatus.Active;
 
-            // step 1: read the last 512 bytes to determine the message type
-            // JSONL structure: {...,"type":"assistant","uuid":"...","timestamp":"..."}
-            // the top-level "type" is always near the END of each entry
-            var typeReadStart = Math.Max(0, length - 512);
-            fs.Seek(typeReadStart, SeekOrigin.Begin);
-            var typeBuf = new byte[length - typeReadStart];
-            _ = fs.Read(typeBuf, 0, typeBuf.Length);
-            var typeTail = Encoding.UTF8.GetString(typeBuf);
+            // read a tail window and isolate the last JSONL entry.
+            // we must check only the last entry — the previous 512-byte approach
+            // could bleed into the prior entry and misidentify the type.
+            var readStart = Math.Max(0, length - JsonlTailBytes);
+            fs.Seek(readStart, SeekOrigin.Begin);
+            var buf = new byte[length - readStart];
+            _ = fs.Read(buf, 0, buf.Length);
+            var tail = Encoding.UTF8.GetString(buf);
 
-            if (typeTail.Contains(",\"type\":\"user\",", StringComparison.Ordinal) ||
-                typeTail.Contains(",\"type\":\"human\",", StringComparison.Ordinal))
-                return AIStatus.Working;
-
-            if (!typeTail.Contains(",\"type\":\"assistant\",", StringComparison.Ordinal))
-                return AIStatus.Active;
-
-            // step 2: it's an assistant message — check if this entry has tool_use
-            // read a larger window and find the last entry boundary (newline)
-            var entryReadStart = Math.Max(0, length - JsonlTailBytes);
-            fs.Seek(entryReadStart, SeekOrigin.Begin);
-            var entryBuf = new byte[length - entryReadStart];
-            _ = fs.Read(entryBuf, 0, entryBuf.Length);
-            var entryTail = Encoding.UTF8.GetString(entryBuf);
-
-            // everything after the last newline is the last JSONL entry
-            // trim trailing newline first — JSONL files typically end with \n
-            var trimmed = entryTail.AsSpan().TrimEnd('\n').TrimEnd('\r');
+            // extract last entry (everything after the last newline, trimming trailing newlines)
+            var trimmed = tail.AsSpan().TrimEnd('\n').TrimEnd('\r');
             var lastNl = trimmed.LastIndexOf('\n');
             var lastEntry = lastNl >= 0 ? trimmed[(lastNl + 1)..] : trimmed;
 
+            // determine message type from the last entry only
+            if (lastEntry.Contains(",\"type\":\"user\",", StringComparison.Ordinal) ||
+                lastEntry.Contains(",\"type\":\"human\",", StringComparison.Ordinal))
+            {
+                // an interrupted request leaves a user entry but Claude isn't working
+                if (lastEntry.Contains("Request interrupted by user", StringComparison.Ordinal))
+                    return AIStatus.WaitingForInput;
+                return AIStatus.Working;
+            }
+
+            if (!lastEntry.Contains(",\"type\":\"assistant\",", StringComparison.Ordinal))
+                return AIStatus.Active;
+
+            // it's an assistant message — check if it contains tool_use
             if (lastEntry.Contains("\"type\":\"tool_use\"", StringComparison.Ordinal))
                 return AIStatus.WaitingForPermission;
 
