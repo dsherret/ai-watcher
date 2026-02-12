@@ -24,7 +24,7 @@ public class ClaudeCodeProvider : IAIProvider
 
         var instances = new List<AIInstance>();
 
-        // single WMI query to get all claude-related process info
+        // single query to get all claude-related process info
         var processInfo = LoadProcessInfo();
 
         // 1) debug-log-based discovery (CLI sessions)
@@ -34,8 +34,8 @@ public class ClaudeCodeProvider : IAIProvider
             var now = DateTime.UtcNow;
 
             // count CLI processes per workspace so we know how many sessions to show
-            var cliProcessCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            var cliWorkspaceSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var cliProcessCount = new Dictionary<string, int>(PathComparer);
+            var cliWorkspaceSet = new HashSet<string>(PathComparer);
             foreach (var cli in processInfo.CliProcesses)
             {
                 cliWorkspaceSet.Add(cli.Workspace);
@@ -45,7 +45,7 @@ public class ClaudeCodeProvider : IAIProvider
 
             // collect all alive candidates per workspace
             var candidatesPerWorkspace = new Dictionary<string, List<(string sessionId, DateTime lastWrite)>>(
-                StringComparer.OrdinalIgnoreCase);
+                PathComparer);
 
             foreach (var fi in debugDir.EnumerateFiles("*.txt"))
             {
@@ -118,7 +118,11 @@ public class ClaudeCodeProvider : IAIProvider
         return Task.FromResult<IReadOnlyList<AIInstance>>(instances);
     }
 
+    // --- Process discovery (platform-specific) ---
+
 #if WINDOWS
+    private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
+
     private record ProcessInfoResult(
         List<CliProcess> CliProcesses,
         List<VscodeProcess> VscodeProcesses);
@@ -169,7 +173,83 @@ public class ClaudeCodeProvider : IAIProvider
 
         return new ProcessInfoResult(cliProcesses, vscodeProcesses);
     }
+#elif MACCATALYST
+    private static readonly StringComparer PathComparer = StringComparer.Ordinal;
+
+    private record ProcessInfoResult(
+        List<CliProcess> CliProcesses,
+        List<VscodeProcess> VscodeProcesses);
+
+    private record CliProcess(uint Pid, string? CommandLine, string Workspace);
+    private record VscodeProcess(uint Pid, string CommandLine, string Workspace);
+
+    private static ProcessInfoResult LoadProcessInfo()
+    {
+        var cliProcesses = new List<CliProcess>();
+        var vscodeProcesses = new List<VscodeProcess>();
+
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "ps",
+                ArgumentList = { "-Aeo", "pid=,args=" },
+                RedirectStandardOutput = true,
+                UseShellExecute = false
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return new([], []);
+
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+
+            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                try
+                {
+                    var trimmed = line.AsSpan().Trim();
+
+                    // parse PID
+                    var pidEnd = trimmed.IndexOf(' ');
+                    if (pidEnd < 0) continue;
+                    if (!uint.TryParse(trimmed[..pidEnd], out var pid)) continue;
+
+                    // rest is the full command line (args)
+                    var args = trimmed[(pidEnd + 1)..].TrimStart().ToString();
+
+                    // extract executable name from args
+                    var firstSpace = args.IndexOf(' ');
+                    var execPath = firstSpace >= 0 ? args[..firstSpace] : args;
+                    var execName = Path.GetFileName(execPath);
+
+                    var isClaudeCode =
+                        execName.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+                        (execName.Equals("node", StringComparison.OrdinalIgnoreCase) &&
+                         args.Contains("claude-code", StringComparison.OrdinalIgnoreCase));
+
+                    if (!isClaudeCode) continue;
+
+                    var isVscode = args.Contains("claude-vscode", StringComparison.OrdinalIgnoreCase);
+
+                    var cwd = ProcessHelper.GetCurrentDirectory(pid);
+                    if (cwd == null) continue;
+                    var workspace = cwd.TrimEnd('/');
+
+                    if (isVscode)
+                        vscodeProcesses.Add(new VscodeProcess(pid, args, workspace));
+                    else
+                        cliProcesses.Add(new CliProcess(pid, args, workspace));
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        return new ProcessInfoResult(cliProcesses, vscodeProcesses);
+    }
 #else
+    private static readonly StringComparer PathComparer = StringComparer.Ordinal;
+
     private record ProcessInfoResult(
         List<CliProcess> CliProcesses,
         List<VscodeProcess> VscodeProcesses);
@@ -184,9 +264,9 @@ public class ClaudeCodeProvider : IAIProvider
         List<AIInstance> instances,
         ProcessInfoResult processInfo, string projectsDir)
     {
-#if WINDOWS
+#if WINDOWS || MACCATALYST
         // count how many CLI instances we already have per workspace
-        var foundCountPerWorkspace = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var foundCountPerWorkspace = new Dictionary<string, int>(PathComparer);
         foreach (var inst in instances)
         {
             if (!inst.ProviderName.Contains("VS Code"))
@@ -197,7 +277,7 @@ public class ClaudeCodeProvider : IAIProvider
         }
 
         // group CLI processes by workspace
-        var cliByWorkspace = new Dictionary<string, List<CliProcess>>(StringComparer.OrdinalIgnoreCase);
+        var cliByWorkspace = new Dictionary<string, List<CliProcess>>(PathComparer);
         foreach (var cli in processInfo.CliProcesses)
         {
             if (!cliByWorkspace.TryGetValue(cli.Workspace, out var list))
@@ -236,10 +316,10 @@ public class ClaudeCodeProvider : IAIProvider
         List<AIInstance> instances,
         ProcessInfoResult processInfo, string projectsDir)
     {
-#if WINDOWS
+#if WINDOWS || MACCATALYST
         // track VS Code workspaces to show only one VS Code session per workspace
         // (multiple claude.exe processes per workspace are common due to extension restarts)
-        var vscodeWorkspaces = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var vscodeWorkspaces = new HashSet<string>(PathComparer);
 
         foreach (var vsc in processInfo.VscodeProcesses)
         {
@@ -407,14 +487,22 @@ public class ClaudeCodeProvider : IAIProvider
         }
     }
 
+    // --- Path encoding/decoding (platform-specific) ---
+
     private static string EncodeWorkspacePath(string path)
     {
-        // V:\AIWatcher → V--AIWatcher (inverse of DecodeWorkspacePath)
+#if WINDOWS
+        // V:\AIWatcher → V--AIWatcher
         return path.Replace(@":\", "--").Replace(@"\", "--");
+#else
+        // /Users/david/dev/ai-watcher → -Users-david-dev-ai-watcher
+        return path.Replace('/', '-');
+#endif
     }
 
     private static string DecodeWorkspacePath(string folderName)
     {
+#if WINDOWS
         // folder names encode paths: "V--AIWatcher" → "V:\AIWatcher"
         // first segment before -- is the drive letter, rest are path separators
         var parts = folderName.Split("--");
@@ -423,5 +511,51 @@ public class ClaudeCodeProvider : IAIProvider
 
         // first part is drive letter (or root), rejoin rest with backslash
         return parts[0].ToUpperInvariant() + @":\" + string.Join(@"\", parts[1..]);
+#else
+        // macOS/Linux: folder encodes path with / replaced by -
+        // e.g. "-Users-david-dev-ai-watcher" → "/Users/david/dev/ai-watcher"
+        // Decode by probing the filesystem to resolve ambiguity with hyphenated names
+        if (!folderName.StartsWith('-'))
+            return folderName;
+
+        var segments = folderName[1..].Split('-');
+        return ProbeDecodePath(segments, 0, "") ?? "/" + folderName[1..].Replace('-', '/');
+#endif
     }
+
+#if !WINDOWS
+    /// <summary>
+    /// Recursively probes the filesystem to decode an encoded workspace path.
+    /// Tries shortest segment first (greedy), with backtracking for hyphenated names.
+    /// </summary>
+    private static string? ProbeDecodePath(string[] segments, int startIdx, string currentPath)
+    {
+        if (startIdx >= segments.Length)
+            return Directory.Exists(currentPath) ? currentPath : null;
+
+        for (var len = 1; len <= segments.Length - startIdx; len++)
+        {
+            var component = string.Join('-', segments[startIdx..(startIdx + len)]);
+            var nextPath = currentPath + "/" + component;
+
+            // if this is the last component, it must be the final directory
+            if (startIdx + len == segments.Length)
+            {
+                if (Directory.Exists(nextPath))
+                    return nextPath;
+                continue;
+            }
+
+            // intermediate component must exist as a directory
+            if (!Directory.Exists(nextPath))
+                continue;
+
+            var result = ProbeDecodePath(segments, startIdx + len, nextPath);
+            if (result != null)
+                return result;
+        }
+
+        return null;
+    }
+#endif
 }

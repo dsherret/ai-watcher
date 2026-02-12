@@ -54,6 +54,29 @@ namespace AIWatcher
                 Preferences.Set("WindowWidth", window.Width);
                 Preferences.Set("WindowHeight", window.Height);
             };
+#elif MACCATALYST
+            window.Created += (_, _) =>
+            {
+                if (Preferences.ContainsKey("WindowX"))
+                {
+                    window.X = Preferences.Get("WindowX", 0.0);
+                    window.Y = Preferences.Get("WindowY", 0.0);
+                    window.Width = Preferences.Get("WindowWidth", 400.0);
+                    window.Height = Preferences.Get("WindowHeight", 600.0);
+                }
+                else
+                {
+                    window.Height = 600;
+                }
+            };
+
+            window.Destroying += (_, _) =>
+            {
+                Preferences.Set("WindowX", window.X);
+                Preferences.Set("WindowY", window.Y);
+                Preferences.Set("WindowWidth", window.Width);
+                Preferences.Set("WindowHeight", window.Height);
+            };
 #endif
 
             return window;

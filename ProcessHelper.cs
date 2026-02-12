@@ -90,4 +90,52 @@ public static class ProcessHelper
         }
     }
 }
+#elif MACCATALYST
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace AIWatcher;
+
+/// <summary>
+/// Reads the current working directory of another process via proc_pidinfo.
+/// </summary>
+public static class ProcessHelper
+{
+    [DllImport("/usr/lib/libproc.dylib")]
+    private static extern int proc_pidinfo(int pid, int flavor, ulong arg, byte[] buffer, int buffersize);
+
+    // PROC_PIDVNODEPATHINFO returns proc_vnodepathinfo struct containing CWD and root dir
+    private const int PROC_PIDVNODEPATHINFO = 9;
+
+    // struct layout:
+    //   proc_vnodepathinfo {
+    //     vnode_info_path pvi_cdir;  // 1176 bytes (vnode_info 152 + path 1024)
+    //     vnode_info_path pvi_rdir;  // 1176 bytes
+    //   }
+    // CWD path string starts at offset 152 (after vnode_info in pvi_cdir)
+    private const int STRUCT_SIZE = 2352;
+    private const int CWD_PATH_OFFSET = 152;
+
+    public static string? GetCurrentDirectory(uint pid)
+    {
+        try
+        {
+            var buffer = new byte[STRUCT_SIZE];
+            var result = proc_pidinfo((int)pid, PROC_PIDVNODEPATHINFO, 0, buffer, buffer.Length);
+            if (result <= 0)
+                return null;
+
+            // find null terminator in the CWD path
+            var pathEnd = Array.IndexOf(buffer, (byte)0, CWD_PATH_OFFSET);
+            if (pathEnd <= CWD_PATH_OFFSET)
+                return null;
+
+            return Encoding.UTF8.GetString(buffer, CWD_PATH_OFFSET, pathEnd - CWD_PATH_OFFSET);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
 #endif

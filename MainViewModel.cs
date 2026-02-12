@@ -40,7 +40,7 @@ public class MainViewModel : INotifyPropertyChanged
     private static void OnActivate(AIInstance? instance)
     {
         if (instance == null) return;
-#if WINDOWS
+#if WINDOWS || MACCATALYST
         WindowActivator.ActivateSession(instance.Id, instance.Workspace, instance.ProviderName);
 #endif
     }

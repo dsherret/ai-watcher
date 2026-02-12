@@ -210,4 +210,220 @@ public static class WindowActivator
         return SetForegroundWindow(hwnd);
     }
 }
+#elif MACCATALYST
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace AIWatcher;
+
+public static class WindowActivator
+{
+    [DllImport("/usr/lib/libproc.dylib")]
+    private static extern int proc_pidpath(int pid, byte[] buffer, int buffersize);
+
+    /// <summary>
+    /// Finds the window for a Claude Code session and brings it to the foreground.
+    /// </summary>
+    public static bool ActivateSession(string sessionId, string workspace, string providerName)
+    {
+        bool isVscode = providerName.Contains("VS Code", StringComparison.OrdinalIgnoreCase);
+
+        if (isVscode)
+        {
+            // try common VS Code-like editors
+            return ActivateAppByName("Visual Studio Code")
+                || ActivateAppByName("Code")
+                || ActivateAppByName("Cursor");
+        }
+
+        // for CLI sessions: walk up the process tree to find the terminal app
+        var tree = LoadProcessTree();
+
+        uint? pid = null;
+        if (sessionId.StartsWith("cli-") && uint.TryParse(sessionId.AsSpan(4), out var directPid))
+        {
+            pid = directPid;
+        }
+        else
+        {
+            pid = FindByCommandLine(tree, sessionId);
+            if (pid != null)
+            {
+                var cwd = ProcessHelper.GetCurrentDirectory(pid.Value);
+                if (cwd == null || cwd.TrimEnd('/') != workspace.TrimEnd('/'))
+                    pid = null;
+            }
+        }
+        pid ??= FindCliByWorkingDirectory(tree, workspace);
+
+        if (pid != null)
+        {
+            var appName = FindAncestorApp(tree, pid.Value);
+            if (appName != null)
+                return ActivateAppByName(appName);
+        }
+
+        return false;
+    }
+
+    private record ProcessInfo(uint Pid, uint ParentPid, string Args);
+
+    private static Dictionary<uint, ProcessInfo> LoadProcessTree()
+    {
+        var map = new Dictionary<uint, ProcessInfo>();
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ps",
+                ArgumentList = { "-Aeo", "pid=,ppid=,args=" },
+                RedirectStandardOutput = true,
+                UseShellExecute = false
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null) return map;
+
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+
+            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                try
+                {
+                    var trimmed = line.AsSpan().Trim();
+
+                    var pidEnd = trimmed.IndexOf(' ');
+                    if (pidEnd < 0) continue;
+                    if (!uint.TryParse(trimmed[..pidEnd], out var pid)) continue;
+
+                    var afterPid = trimmed[(pidEnd + 1)..].TrimStart();
+                    var ppidEnd = afterPid.IndexOf(' ');
+                    if (ppidEnd < 0) continue;
+                    if (!uint.TryParse(afterPid[..ppidEnd], out var ppid)) continue;
+
+                    var args = afterPid[(ppidEnd + 1)..].TrimStart().ToString();
+
+                    map[pid] = new ProcessInfo(pid, ppid, args);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    private static uint? FindByCommandLine(Dictionary<uint, ProcessInfo> tree, string sessionId)
+    {
+        foreach (var p in tree.Values)
+        {
+            if (p.Args.Contains(sessionId, StringComparison.OrdinalIgnoreCase))
+                return p.Pid;
+        }
+        return null;
+    }
+
+    private static uint? FindCliByWorkingDirectory(
+        Dictionary<uint, ProcessInfo> tree, string workspace)
+    {
+        var normalized = workspace.TrimEnd('/');
+
+        foreach (var p in tree.Values)
+        {
+            var firstSpace = p.Args.IndexOf(' ');
+            var execPath = firstSpace >= 0 ? p.Args[..firstSpace] : p.Args;
+            var execName = Path.GetFileName(execPath);
+
+            bool isCandidate =
+                execName.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+                (execName.Equals("node", StringComparison.OrdinalIgnoreCase) &&
+                 p.Args.Contains("claude-code", StringComparison.OrdinalIgnoreCase));
+
+            if (!isCandidate) continue;
+            if (p.Args.Contains("claude-vscode", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var cwd = ProcessHelper.GetCurrentDirectory(p.Pid);
+            if (cwd?.TrimEnd('/') == normalized)
+                return p.Pid;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Walks up the process tree to find the nearest ancestor that lives inside a .app bundle.
+    /// Returns the app name suitable for AppleScript activation.
+    /// </summary>
+    private static string? FindAncestorApp(Dictionary<uint, ProcessInfo> tree, uint pid)
+    {
+        var visited = new HashSet<uint>();
+        var current = pid;
+
+        while (visited.Add(current))
+        {
+            var appName = GetAppNameFromPid((int)current);
+            if (appName != null)
+                return appName;
+
+            if (tree.TryGetValue(current, out var info))
+                current = info.ParentPid;
+            else
+                break;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the app bundle name for a process by checking if its executable is inside a .app bundle.
+    /// </summary>
+    private static string? GetAppNameFromPid(int pid)
+    {
+        try
+        {
+            var buffer = new byte[4096];
+            var length = proc_pidpath(pid, buffer, buffer.Length);
+            if (length <= 0) return null;
+
+            var path = Encoding.UTF8.GetString(buffer, 0, length);
+
+            // check if path contains ".app/Contents/MacOS/"
+            var appIdx = path.IndexOf(".app/", StringComparison.Ordinal);
+            if (appIdx < 0) return null;
+
+            // extract app name: find the last / before ".app/"
+            var lastSlash = path.LastIndexOf('/', appIdx);
+            if (lastSlash < 0) return null;
+
+            return path[(lastSlash + 1)..appIdx];
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool ActivateAppByName(string appName)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "osascript",
+                ArgumentList = { "-e", $"tell application \"{appName}\" to activate" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            using var proc = Process.Start(psi);
+            proc?.WaitForExit(3000);
+            return proc?.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
 #endif
