@@ -84,7 +84,14 @@ public class MainViewModel : INotifyPropertyChanged
 
     private void SyncCollection(List<AIInstance> latest)
     {
-        var latestById = latest.ToDictionary(i => i.Id);
+        // deduplicate by ID — a session can appear from multiple discovery paths
+        // (e.g. debug-log + VS Code fallback reading the same JSONL)
+        var latestById = new Dictionary<string, AIInstance>(latest.Count);
+        for (var i = latest.Count - 1; i >= 0; i--)
+        {
+            // first-added wins (earlier discovery paths have better status info)
+            latestById.TryAdd(latest[i].Id, latest[i]);
+        }
 
         // remove instances that are no longer present
         for (var i = Instances.Count - 1; i >= 0; i--)
@@ -94,7 +101,7 @@ public class MainViewModel : INotifyPropertyChanged
         }
 
         // update existing or add new
-        foreach (var instance in latest)
+        foreach (var instance in latestById.Values)
         {
             var existing = FindById(instance.Id);
             if (existing != null)
