@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:local="clr-namespace:AIWatcher"
+             x:Class="AIWatcher.MainPage"
+             x:DataType="local:MainViewModel"
+             Shell.NavBarIsVisible="False">
+
+    <Grid RowDefinitions="*,Auto" Padding="16">
+        <CollectionView ItemsSource="{Binding Instances}"
+                        SelectionMode="Single"
+                        SelectionChanged="OnSelectionChanged">
+            <CollectionView.EmptyView>
+                <Label Text="No AI instances detected"
+                       HorizontalOptions="Center"
+                       VerticalOptions="Center"
+                       TextColor="Gray"
+                       FontSize="16" />
+            </CollectionView.EmptyView>
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="local:AIInstance">
+                    <Border Stroke="Transparent"
+                            StrokeShape="RoundRectangle 8"
+                            BackgroundColor="{AppThemeBinding Light=#F5F5F5, Dark=#2A2A2A}"
+                            Padding="12"
+                            Margin="0,4">
+                        <Grid ColumnDefinitions="16,*,Auto" ColumnSpacing="12">
+                            <!-- status dot -->
+                            <Ellipse Grid.Column="0"
+                                     WidthRequest="12"
+                                     HeightRequest="12"
+                                     VerticalOptions="Center"
+                                     Fill="{Binding StatusColor}" />
+
+                            <!-- workspace + status -->
+                            <VerticalStackLayout Grid.Column="1" Spacing="2" VerticalOptions="Center">
+                                <Label Text="{Binding Workspace}"
+                                       FontAttributes="Bold"
+                                       FontSize="15" />
+                                <Label Text="{Binding StatusText}"
+                                       FontSize="13"
+                                       TextColor="Gray" />
+                            </VerticalStackLayout>
+
+                            <!-- provider badge -->
+                            <Border Grid.Column="2"
+                                    StrokeShape="RoundRectangle 4"
+                                    Stroke="Gray"
+                                    StrokeThickness="1"
+                                    Padding="6,2"
+                                    VerticalOptions="Center">
+                                <Label Text="{Binding ProviderName}"
+                                       FontSize="11"
+                                       TextColor="Gray" />
+                            </Border>
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+
+        <!-- footer -->
+        <Label Grid.Row="1"
+               Text="{Binding LastUpdatedText}"
+               FontSize="11"
+               TextColor="Gray"
+               HorizontalOptions="Center"
+               Margin="0,8,0,0" />
+    </Grid>
+
+</ContentPage>
