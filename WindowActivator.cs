@@ -261,7 +261,7 @@ public static class WindowActivator
         {
             var appName = FindAncestorApp(tree, pid.Value);
             if (appName != null)
-                return ActivateAppByName(appName);
+                return ActivateTerminalWindow(appName, pid.Value);
         }
 
         return false;
@@ -404,14 +404,97 @@ public static class WindowActivator
         }
     }
 
-    private static bool ActivateAppByName(string appName)
+    /// <summary>
+    /// Activates the specific terminal window/tab that owns the given process,
+    /// by matching its tty. Falls back to activating the whole app.
+    /// </summary>
+    private static bool ActivateTerminalWindow(string appName, uint pid)
+    {
+        var tty = GetProcessTty(pid);
+        if (tty != null)
+        {
+            var script = appName switch
+            {
+                "Terminal" => $"""
+                    tell application "Terminal"
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                if tty of t is "{tty}" then
+                                    set index of w to 1
+                                    set selected tab of w to t
+                                    activate
+                                    return
+                                end if
+                            end repeat
+                        end repeat
+                    end tell
+                    """,
+                "iTerm2" or "iTerm" => $"""
+                    tell application "iTerm2"
+                        repeat with w in windows
+                            repeat with aTab in tabs of w
+                                repeat with s in sessions of aTab
+                                    if tty of s is "{tty}" then
+                                        select w
+                                        tell aTab to select
+                                        select s
+                                        activate
+                                        return
+                                    end if
+                                end repeat
+                            end repeat
+                        end repeat
+                    end tell
+                    """,
+                _ => null
+            };
+
+            if (script != null && RunAppleScript(script))
+                return true;
+        }
+
+        return ActivateAppByName(appName);
+    }
+
+    /// <summary>
+    /// Gets the controlling tty for a process (e.g. "/dev/ttys003").
+    /// </summary>
+    private static string? GetProcessTty(uint pid)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ps",
+                ArgumentList = { "-o", "tty=", "-p", pid.ToString() },
+                RedirectStandardOutput = true,
+                UseShellExecute = false
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null) return null;
+
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit(3000);
+
+            if (string.IsNullOrEmpty(output) || output == "??")
+                return null;
+
+            return "/dev/" + output;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool RunAppleScript(string script)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = "osascript",
-                ArgumentList = { "-e", $"tell application \"{appName}\" to activate" },
+                ArgumentList = { "-e", script },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false
@@ -424,6 +507,11 @@ public static class WindowActivator
         {
             return false;
         }
+    }
+
+    private static bool ActivateAppByName(string appName)
+    {
+        return RunAppleScript($"tell application \"{appName}\" to activate");
     }
 }
 #endif
